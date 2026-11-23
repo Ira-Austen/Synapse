@@ -32,12 +32,15 @@ jobs:
         run: chmod +x gradlew
 
       - name: Decode optional release keystore
-        if: ${{ secrets.SYNAPSE_KEYSTORE_BASE64 != '' }}
         env:
           SYNAPSE_KEYSTORE_BASE64: ${{ secrets.SYNAPSE_KEYSTORE_BASE64 }}
         run: |
-          echo "$SYNAPSE_KEYSTORE_BASE64" | base64 -d > release.keystore
-          echo "SYNAPSE_KEYSTORE_PATH=$GITHUB_WORKSPACE/release.keystore" >> $GITHUB_ENV
+          if [ -n "$SYNAPSE_KEYSTORE_BASE64" ]; then
+            echo "$SYNAPSE_KEYSTORE_BASE64" | base64 -d > release.keystore
+            echo "SYNAPSE_KEYSTORE_PATH=$GITHUB_WORKSPACE/release.keystore" >> $GITHUB_ENV
+          else
+            echo "No release keystore secret configured; falling back to debug signing."
+          fi
 
       - name: Run all unit tests
         run: ./gradlew :core-protocol:test :agent-runtime:test :kernel-engine:testDebugUnitTest :app:testModernDebugUnitTest
