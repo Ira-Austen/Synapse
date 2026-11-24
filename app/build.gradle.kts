@@ -77,13 +77,22 @@ android {
     }
 
     signingConfigs {
+        val localProps = Properties().apply {
+            val f = rootProject.file("local.properties")
+            if (f.exists()) f.inputStream().use { load(it) }
+        }
         val ksPath = System.getenv("SYNAPSE_KEYSTORE_PATH")?.trim().orEmpty()
-        if (ksPath.isNotEmpty() && file(ksPath).exists()) {
+            .ifBlank { localProps.getProperty("synapse.keystorePath")?.trim().orEmpty() }
+        val ksFile = ksPath.takeIf { it.isNotEmpty() }?.let { rootProject.file(it) }
+        if (ksFile != null && ksFile.exists()) {
             create("release") {
-                storeFile = file(ksPath)
+                storeFile = ksFile
                 storePassword = System.getenv("SYNAPSE_KEYSTORE_PASS").orEmpty()
+                    .ifBlank { localProps.getProperty("synapse.keystorePass").orEmpty() }
                 keyAlias = System.getenv("SYNAPSE_KEY_ALIAS").orEmpty()
+                    .ifBlank { localProps.getProperty("synapse.keyAlias").orEmpty() }
                 keyPassword = System.getenv("SYNAPSE_KEY_PASS").orEmpty()
+                    .ifBlank { localProps.getProperty("synapse.keyPass").orEmpty() }
             }
         }
     }
