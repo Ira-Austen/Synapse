@@ -139,6 +139,7 @@ object AppInspector {
         }
 
         pkgInfo?.services.orEmpty().forEach { svc ->
+            if (!svc.enabled) return@forEach
             val proc = svc.processName?.takeIf { it.isNotBlank() } ?: pkg
             val comp = "$pkg/${svc.name}"
             val short = svc.name.substringAfterLast('.')
@@ -159,6 +160,7 @@ object AppInspector {
         }
 
         pkgInfo?.receivers.orEmpty().forEach { rcv ->
+            if (!rcv.enabled) return@forEach
             val proc = rcv.processName?.takeIf { it.isNotBlank() } ?: pkg
             val comp = "$pkg/${rcv.name}"
             val short = rcv.name.substringAfterLast('.')

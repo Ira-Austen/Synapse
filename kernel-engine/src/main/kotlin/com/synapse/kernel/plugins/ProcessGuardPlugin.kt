@@ -307,7 +307,7 @@ class ProcessGuardPlugin : KernelPlugin {
                 detail = "manual_wake type=${rule.wakeType} comp=$wakeComponent"
             )
             ctx.observerHub.notifyEvent(IpcProtocol.OBSERVER_EVENT_PROCESS or IpcProtocol.OBSERVER_EVENT_AUDIT)
-            if (ok) true to "OK" else false to "唤醒服务启动被系统拒绝"
+            if (ok) true to "OK" else false to "唤醒服务被系统拦截或组件不可用（请重启激活新版微内核或在系统设置开启自启动）"
         } catch (t: Throwable) {
             false to "${t.javaClass.simpleName}: ${t.message}"
         } finally {
@@ -457,13 +457,14 @@ class ProcessGuardPlugin : KernelPlugin {
 
     private fun startServiceCompat(context: Context, intent: Intent, userHandle: UserHandle?): Boolean {
         return runCatching {
-            if (userHandle != null) {
+            val started = if (userHandle != null) {
                 val m = context.javaClass.getMethod("startServiceAsUser", Intent::class.java, UserHandle::class.java)
-                m.invoke(context, intent, userHandle)
+                m.invoke(context, intent, userHandle) as? ComponentName
             } else {
                 context.startService(intent)
             }
-            true
+            // AMS returns null when ColorOS / OEM startup interception blocks the service launch
+            started != null
         }.getOrDefault(false)
     }
 

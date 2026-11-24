@@ -67,7 +67,8 @@ object PushSdkClassifier {
     private val NOISE_COMPONENT_TOKENS = listOf(
         "jobservice", "workmanager", "androidx.", "crash", "bugly", "analytics",
         "billing", "download", "webview", "uploadlog", "fileprovider", "tinker",
-        "leakcanary", "adservice", "gameaidl", "h5game"
+        "leakcanary", "adservice", "gameaidl", "h5game",
+        "logservice", "logmonitor", "clientmonitor", "dexopt"
     )
 
     fun isNoiseProcessName(procName: String, isMain: Boolean): Boolean {
@@ -200,7 +201,21 @@ object PushSdkClassifier {
         var tag = if (type == WakeType.SERVICE) "后台服务" else "唤醒广播"
 
         when {
+            lower.contains("intentservice") -> {
+                // IntentService auto-calls stopSelf() immediately after onHandleIntent(), making it
+                // unsuitable as a persistent push wake target compared to daemon Services.
+                score -= 20
+                tag = "一次性 IntentService（不建议常驻唤醒）"
+            }
             lower.contains("xgvippushservice") -> { score += 110; tag = "腾讯 TPNS 核心服务" }
+            lower.contains("pushcoreservice") -> {
+                score += if (lower.contains("\$kernelservice") || lower.contains("\$innerservice")) 90 else 108
+                tag = "钉钉 / 来往核心推送服务"
+            }
+            lower.contains("alipay.pushsdk.push.notificationservice") -> {
+                score += 100
+                tag = "mPaaS 核心推送服务"
+            }
             lower.contains("tpush") || lower.contains("tpns") -> { score += 80; tag = "腾讯推送服务" }
             lower.contains("cn.jpush.android.service.pushservice") || lower.contains("jcommonservice") -> {
                 score += 105; tag = "极光核心推送服务"
@@ -218,6 +233,7 @@ object PushSdkClassifier {
             lower.contains("rongpush") || lower.contains("nimservice") || lower.contains("emchat") -> {
                 score += 90; tag = "IM 长连接服务"
             }
+            lower.contains("longlinkservice") -> { score += 95; tag = "长连接核心服务" }
             lower.contains("pushservice") || lower.contains("push") -> { score += 70; tag = "推送服务" }
             lower.contains("mqtt") || lower.contains("socket") || lower.contains("channel") || lower.contains("ims") || lower.contains("longlink") -> {
                 score += 65; tag = "长连接服务"

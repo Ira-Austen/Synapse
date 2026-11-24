@@ -497,11 +497,28 @@ class SynapseViewModel(application: Application) : AndroidViewModel(application)
 
     fun wakeRuleProcess(rule: ProcessRule) {
         viewModelScope.launch {
+            val label = resolveSingleLabel(rule.pkg)
             val res = wakeRuleInternal(rule)
             if (res.isSuccess) {
-                setToast("已唤醒 ${resolveSingleLabel(rule.pkg)} 的推送服务")
-                delay(900L)
+                // Wait for async process spawn and verify real liveness before reporting success
+                delay(700L)
                 refreshManagedProcessesSync()
+                var group = _uiState.value.processSnapshot.groups
+                    .firstOrNull { it.rule.ruleKey == rule.ruleKey }
+                if (group == null || group.aliveCount == 0) {
+                    delay(700L)
+                    refreshManagedProcessesSync()
+                    group = _uiState.value.processSnapshot.groups
+                        .firstOrNull { it.rule.ruleKey == rule.ruleKey }
+                }
+                when {
+                    group?.targetAlive == true ->
+                        setToast("已唤醒 $label 的推送进程")
+                    (group?.aliveCount ?: 0) > 0 ->
+                        setToast("已唤醒 $label（存活 ${group!!.aliveCount} 个进程，推送子进程待就绪）")
+                    else ->
+                        setToast("已发送唤醒指令，但 $label 未拉起（可能被系统自启动拦截或所选服务会自动退出；请重启激活新版内核或在「调整设置」更换唤醒服务）")
+                }
             } else {
                 setToast("唤醒失败：${res.exceptionOrNull()?.message ?: "请先手动打开一次应用"}")
             }
@@ -547,13 +564,19 @@ class SynapseViewModel(application: Application) : AndroidViewModel(application)
                 if (wakeRes.isSuccess) {
                     delay(900L)
                     refreshManagedProcessesSync()
-                    setToast("已开启保活，并自动唤醒 ${enriched.appName} 推送进程")
+                    val wokeGroup = _uiState.value.processSnapshot.groups
+                        .firstOrNull { it.rule.ruleKey == enriched.ruleKey }
+                    if (wokeGroup?.targetAlive == true || (wokeGroup?.aliveCount ?: 0) > 0) {
+                        setToast("已开启保活，并自动唤醒 ${enriched.appName} 推送进程")
+                    } else {
+                        setToast("规则已生效，但后台拉起被系统拦截或服务已退出（请重启激活新版内核或先手动打开一次 ${enriched.appName}）")
+                    }
                 } else {
                     val reason = wakeRes.exceptionOrNull()?.message.orEmpty()
                     if (reason.contains("Root")) {
                         setToast("规则已生效，但自动唤醒失败：未授予 Root 权限（或重启激活免 Root 内核唤醒）")
                     } else {
-                        setToast("规则已生效，但未能后台拉起推送：请先打开一次 ${enriched.appName}")
+                        setToast("规则已生效，但未能后台拉起推送：$reason")
                     }
                 }
             } else if (enriched.enabled && !alreadyAlive) {

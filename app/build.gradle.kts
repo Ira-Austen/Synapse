@@ -1,4 +1,3 @@
-import java.security.SecureRandom
 import java.util.Properties
 
 plugins {
@@ -7,54 +6,46 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
-fun loadOrGenerateStealthConfig(): Triple<String, Int, Int> {
+fun loadStealthConfig(): Triple<String, Int, Int> {
+    val defaultPackageName = "com.local.utility.ukz6v84k"
+    val defaultMagicCode = 7417044      // 0x00712CD4 within 0x00530000..0x007EFFFF
+    val defaultHeaderMagic = 1408004550 // 0x53EC71C6
+
     val localPropsFile = rootProject.file("local.properties")
     val props = Properties()
     if (localPropsFile.exists()) {
         localPropsFile.inputStream().use { props.load(it) }
     }
 
-    var changed = false
-    val rng = SecureRandom()
-
-    var pkgName = System.getenv("SYNAPSE_PACKAGE_NAME")?.trim().orEmpty()
-        .ifBlank { props.getProperty("synapse.packageName")?.trim().orEmpty() }
     val validPkgRegex = Regex("^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$")
-    if (pkgName.isBlank() || !validPkgRegex.matches(pkgName)) {
-        val letters = "abcdefghjkmnpqrstuvwxyz"
-        val alphabet = "abcdefghjkmnpqrstuvwxyz23456789"
-        val suffix = buildString {
-            append(letters[rng.nextInt(letters.length)])
-            repeat(7) { append(alphabet[rng.nextInt(alphabet.length)]) }
-        }
-        pkgName = "com.local.utility.$suffix"
-        props.setProperty("synapse.packageName", pkgName)
-        changed = true
+    val configuredPkg = System.getenv("SYNAPSE_PACKAGE_NAME")?.trim().orEmpty()
+        .ifBlank { props.getProperty("synapse.packageName")?.trim().orEmpty() }
+    val pkgName = if (configuredPkg.isNotBlank() && validPkgRegex.matches(configuredPkg)) {
+        configuredPkg
+    } else {
+        defaultPackageName
     }
 
-    var magicCode = System.getenv("SYNAPSE_IPC_MAGIC_CODE")?.trim()?.toIntOrNull()
+    val configuredMagic = System.getenv("SYNAPSE_IPC_MAGIC_CODE")?.trim()?.toIntOrNull()
         ?: props.getProperty("synapse.ipcMagicCode")?.trim()?.toIntOrNull()
-    if (magicCode == null || magicCode !in 0x00530000..0x007EFFFF) {
-        magicCode = 0x00530000 + rng.nextInt(0x007EFFFF - 0x00530000)
-        props.setProperty("synapse.ipcMagicCode", magicCode.toString())
-        changed = true
+    val magicCode = if (configuredMagic != null && configuredMagic in 0x00530000..0x007EFFFF) {
+        configuredMagic
+    } else {
+        defaultMagicCode
     }
 
-    var headerMagic = System.getenv("SYNAPSE_IPC_HEADER_MAGIC")?.trim()?.toIntOrNull()
+    val configuredHeader = System.getenv("SYNAPSE_IPC_HEADER_MAGIC")?.trim()?.toIntOrNull()
         ?: props.getProperty("synapse.ipcHeaderMagic")?.trim()?.toIntOrNull()
-    if (headerMagic == null || headerMagic == 0) {
-        headerMagic = 0x53000000 or (rng.nextInt(0x00FFFFFF))
-        props.setProperty("synapse.ipcHeaderMagic", headerMagic.toString())
-        changed = true
+    val headerMagic = if (configuredHeader != null && configuredHeader != 0) {
+        configuredHeader
+    } else {
+        defaultHeaderMagic
     }
 
-    if (changed) {
-        localPropsFile.outputStream().use { props.store(it, "Synapse stealth build parameters (auto-generated)") }
-    }
     return Triple(pkgName, magicCode, headerMagic)
 }
 
-val (stealthPackageName, stealthMagicCode, stealthHeaderMagic) = loadOrGenerateStealthConfig()
+val (stealthPackageName, stealthMagicCode, stealthHeaderMagic) = loadStealthConfig()
 
 android {
     namespace = "com.synapse.app"

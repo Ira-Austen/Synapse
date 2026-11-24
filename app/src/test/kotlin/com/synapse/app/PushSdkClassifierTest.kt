@@ -1,9 +1,12 @@
 package com.synapse.app
 
+import com.synapse.agent.shell.RootCommandExecutor
+import com.synapse.agent.shell.ShellResult
 import com.synapse.app.data.DeviceBrand
 import com.synapse.app.data.LiveSocketInspector
 import com.synapse.app.data.PushSdkClassifier
 import com.synapse.protocol.WakeType
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -139,5 +142,61 @@ class PushSdkClassifierTest {
         assertEquals("15 分钟前", com.synapse.app.ui.formatFriendlyTime(now - 15 * 60_000L, now))
         assertTrue(com.synapse.app.ui.formatFriendlyTime(now - 2 * 3_600_000L, now).startsWith("今天 "))
         assertTrue(com.synapse.app.ui.formatFriendlyTime(now - 25 * 3_600_000L, now).startsWith("昨天 "))
+    }
+
+    @Test
+    fun persistentPushDaemonsOutrankIntentServiceAndLogServices() {
+        val proc = "com.alibaba.taurus.hainanxc:push"
+        val pushCore = PushSdkClassifier.scoreComponent(
+            proc, "com.laiwang.protocol.multiprocess.service.PushCoreService",
+            WakeType.SERVICE, true, DeviceBrand.OPPO_ONEPLUS
+        )
+        val kernelInner = PushSdkClassifier.scoreComponent(
+            proc, "com.laiwang.protocol.multiprocess.service.PushCoreService\$KernelService",
+            WakeType.SERVICE, true, DeviceBrand.OPPO_ONEPLUS
+        )
+        val mpaasNotif = PushSdkClassifier.scoreComponent(
+            proc, "com.alipay.pushsdk.push.NotificationService",
+            WakeType.SERVICE, true, DeviceBrand.OPPO_ONEPLUS
+        )
+        val intentSvc = PushSdkClassifier.scoreComponent(
+            proc, "com.alipay.pushsdk.push.AppInfoRecvIntentService",
+            WakeType.SERVICE, true, DeviceBrand.OPPO_ONEPLUS
+        )
+        val logSvc = PushSdkClassifier.scoreComponent(
+            proc, "com.alipay.mobile.common.logging.process.LogServiceInPushProcess",
+            WakeType.SERVICE, true, DeviceBrand.OPPO_ONEPLUS
+        )
+        val monitorSvc = PushSdkClassifier.scoreComponent(
+            proc, "com.alipay.mobile.logmonitor.ClientMonitorService",
+            WakeType.SERVICE, true, DeviceBrand.OPPO_ONEPLUS
+        )
+
+        assertTrue(pushCore.score > mpaasNotif.score)
+        assertTrue(pushCore.score > kernelInner.score)
+        assertTrue(mpaasNotif.score > intentSvc.score)
+        assertTrue(kernelInner.score > intentSvc.score)
+        assertTrue(logSvc.score < 0)
+        assertTrue(monitorSvc.score < 0)
+    }
+
+    @Test
+    fun liveSocketProbePreservesRootAvailableWhenTargetAppNotRunning() = runBlocking {
+        var capturedCmd = ""
+        val fakeRootShell = object : RootCommandExecutor {
+            override suspend fun exec(command: String, timeoutMs: Long): ShellResult {
+                capturedCmd = command
+                return ShellResult(exitCode = 0, stdout = "===ROOT_OK===\n===NO_RUNNING_PIDS===")
+            }
+
+            override fun isAlive(): Boolean = true
+            override fun close() = Unit
+        }
+
+        val res = LiveSocketInspector.probePackageSocketsWithExecutor("com.alibaba.taurus.hainanxc", fakeRootShell)
+        assertFalse("Command must never call exit inside PersistentRootShell", capturedCmd.contains(Regex("""\bexit\s+\d+""")))
+        assertTrue(res.rootAvailable)
+        assertFalse(res.anyProcessRunning)
+        assertFalse(res.anyActiveLongLink)
     }
 }

@@ -64,7 +64,8 @@ class PersistentRootShell(
      */
     suspend fun verifyRootAccess(timeoutMs: Long = 3_000L): Boolean {
         val res = exec("id -u", timeoutMs = timeoutMs)
-        return res.isSuccess && res.stdout.trim() == "0"
+        return res.isSuccess &&
+            res.stdout.lineSequence().lastOrNull { it.isNotBlank() }?.trim() == "0"
     }
 
     private fun isAliveLocked(): Boolean = process?.isAlive == true

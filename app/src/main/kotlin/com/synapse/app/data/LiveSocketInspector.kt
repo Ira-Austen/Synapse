@@ -3,6 +3,7 @@ package com.synapse.app.data
 import com.synapse.agent.parser.ProcNetParser
 import com.synapse.agent.parser.SocketEndpoint
 import com.synapse.agent.shell.PersistentRootShell
+import com.synapse.agent.shell.RootCommandExecutor
 
 data class LiveProcessSocketProbe(
     val pid: Int,
@@ -50,48 +51,66 @@ object LiveSocketInspector {
         if (pkg.isBlank()) {
             return PackageSocketProbeResult(pkg, rootAvailable = false, probesByProcess = emptyMap())
         }
-        val escaped = pkg.replace(".", "\\.")
         val shell = PersistentRootShell()
         return try {
-            // Single fast shell script: find running PIDs for pkg, dump their socket fds, and read /proc/net tables
+            probePackageSocketsWithExecutor(pkg, shell)
+        } finally {
+            shell.close()
+        }
+    }
+
+    internal suspend fun probePackageSocketsWithExecutor(
+        pkg: String,
+        shell: RootCommandExecutor
+    ): PackageSocketProbeResult {
+        if (pkg.isBlank()) {
+            return PackageSocketProbeResult(pkg, rootAvailable = false, probesByProcess = emptyMap())
+        }
+        val escaped = pkg.replace(".", "\\.")
+        return try {
+            // Single fast shell script without `exit` (which would terminate the persistent `su`
+            // pipeline before PersistentRootShell prints its EOF marker) and ending with `:` so
+            // optional missing /proc/net/* files never flip the exit code into a false NO_ROOT.
             val cmd = """
                 if [ "${'$'}(id -u 2>/dev/null)" != "0" ]; then
                     echo "===NO_ROOT==="
-                    exit 1
+                else
+                    echo "===ROOT_OK==="
+                    PIDS=${'$'}(ps -A -o PID,NAME 2>/dev/null | grep -E "[[:space:]]${escaped}(:|[[:space:]]|${'$'})")
+                    if [ -z "${'$'}PIDS" ]; then
+                        echo "===NO_RUNNING_PIDS==="
+                    else
+                        echo "===PIDS==="
+                        echo "${'$'}PIDS"
+                        echo "${'$'}PIDS" | while read pid name; do
+                            case "${'$'}pid" in ''|*[!0-9]*) continue ;; esac
+                            echo "===FD:${'$'}pid:${'$'}name==="
+                            ls -l /proc/${'$'}pid/fd 2>/dev/null | grep "socket:\["
+                        done
+                        echo "===TCP==="
+                        cat /proc/net/tcp 2>/dev/null
+                        echo "===TCP6==="
+                        cat /proc/net/tcp6 2>/dev/null
+                        echo "===UDP==="
+                        cat /proc/net/udp 2>/dev/null
+                        echo "===UDP6==="
+                        cat /proc/net/udp6 2>/dev/null
+                    fi
                 fi
-                PIDS=${'$'}(ps -A -o PID,NAME 2>/dev/null | grep -E " ${escaped}(:|${'$'})")
-                if [ -z "${'$'}PIDS" ]; then
-                    echo "===NO_RUNNING_PIDS==="
-                    exit 0
-                fi
-                echo "===PIDS==="
-                echo "${'$'}PIDS"
-                echo "${'$'}PIDS" | while read pid name; do
-                    case "${'$'}pid" in ''|*[!0-9]*) continue ;; esac
-                    echo "===FD:${'$'}pid:${'$'}name==="
-                    ls -l /proc/${'$'}pid/fd 2>/dev/null | grep "socket:\["
-                done
-                echo "===TCP==="
-                cat /proc/net/tcp 2>/dev/null
-                echo "===TCP6==="
-                cat /proc/net/tcp6 2>/dev/null
-                echo "===UDP==="
-                cat /proc/net/udp 2>/dev/null
-                echo "===UDP6==="
-                cat /proc/net/udp6 2>/dev/null
+                :
             """.trimIndent()
 
             val res = shell.exec(cmd, timeoutMs = 5_000L)
             if (res.timedOut || !res.isSuccess || res.stdout.contains("===NO_ROOT===") ||
-                (!res.stdout.contains("===PIDS===") && !res.stdout.contains("===NO_RUNNING_PIDS==="))
+                (!res.stdout.contains("===ROOT_OK===") &&
+                    !res.stdout.contains("===PIDS===") &&
+                    !res.stdout.contains("===NO_RUNNING_PIDS==="))
             ) {
                 return PackageSocketProbeResult(pkg, rootAvailable = false, probesByProcess = emptyMap())
             }
             parseProbeOutput(pkg, res.stdout)
         } catch (_: Throwable) {
             PackageSocketProbeResult(pkg, rootAvailable = false, probesByProcess = emptyMap())
-        } finally {
-            shell.close()
         }
     }
 

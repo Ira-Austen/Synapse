@@ -32,8 +32,8 @@ class SystemAdapter(
             ?: loadClass("com.android.server.pm.AppsFilter")
     val pmsClass: Class<*>? = loadClass("com.android.server.pm.PackageManagerService")
 
-    // ColorOS / Oplus Hans private classes (oplus-services.jar on SYSTEMSERVERCLASSPATH)
-    // Supports both legacy ColorOS 12-13 (`com.android.server.am.*`) and ColorOS 14-16 (`com.android.server.hans.*`)
+    // ColorOS / Oplus Hans & AppStartup private classes (oplus-services.jar on SYSTEMSERVERCLASSPATH)
+    // Supports both legacy ColorOS 12-13 (`com.android.server.am.*`) and ColorOS 14-17 (`com.android.server.hans.*`)
     val oplusHansManagerClass: Class<*>? = loadClass("com.android.server.am.OplusHansManager")
     val oplusHansImportanceClass: Class<*>? =
         loadClass("com.android.server.hans.OplusHansImportance")
@@ -42,6 +42,10 @@ class SystemAdapter(
         loadClass("com.android.server.hans.freeze.HansCGroup")
             ?: loadClass("com.android.server.am.HansCGroup")
             ?: loadClass("com.android.server.am.OplusHansCGroup")
+    val oplusActiveServicesExtClass: Class<*>? = loadClass("com.android.server.am.ActiveServicesExtImpl")
+    val oplusAppStartupManagerClass: Class<*>? = loadClass("com.android.server.am.OplusAppStartupManager")
+    val serviceRecordClass: Class<*>? = loadClass("com.android.server.am.ServiceRecord")
+    val broadcastFilterClass: Class<*>? = loadClass("com.android.server.am.BroadcastFilter")
 
     val oomAdjusterImplName: String =
         if (oomAdjusterModernClass != null) "OomAdjusterModernImpl" else "OomAdjuster"
@@ -81,6 +85,12 @@ class SystemAdapter(
     private val amsContextField: Field? = findField(amsClass, "mContext")
     private val amsLocalDeviceIdleField: Field? = findField(amsClass, "mLocalDeviceIdleController")
     private val amsProcessListField: Field? = findField(amsClass, "mProcessList")
+
+    // ServiceRecord & BroadcastFilter fields (stable across Android 11-17)
+    private val srPackageNameField: Field? = findField(serviceRecordClass, "packageName")
+    private val srUserIdField: Field? = findField(serviceRecordClass, "userId")
+    private val bfPackageNameField: Field? = findField(broadcastFilterClass, "packageName")
+    private val bfOwningUserIdField: Field? = findField(broadcastFilterClass, "owningUserId")
 
     @Volatile
     var amsInstance: Any? = null
@@ -127,6 +137,22 @@ class SystemAdapter(
     fun getProcessPid(processRecord: Any?): Int =
         if (processRecord == null) -1
         else runCatching { (prPidField?.get(processRecord) as? Int) ?: -1 }.getOrDefault(-1)
+
+    fun getServiceRecordPackageName(serviceRecord: Any?): String? =
+        if (serviceRecord == null) null
+        else runCatching { srPackageNameField?.get(serviceRecord) as? String }.getOrNull()
+
+    fun getServiceRecordUserId(serviceRecord: Any?): Int =
+        if (serviceRecord == null) 0
+        else runCatching { (srUserIdField?.get(serviceRecord) as? Int) ?: 0 }.getOrDefault(0)
+
+    fun getBroadcastFilterPackageName(broadcastFilter: Any?): String? =
+        if (broadcastFilter == null) null
+        else runCatching { bfPackageNameField?.get(broadcastFilter) as? String }.getOrNull()
+
+    fun getBroadcastFilterUserId(broadcastFilter: Any?): Int =
+        if (broadcastFilter == null) 0
+        else runCatching { (bfOwningUserIdField?.get(broadcastFilter) as? Int) ?: 0 }.getOrDefault(0)
 
     fun getCurAdj(processRecord: Any?): Int? {
         if (processRecord == null) return null

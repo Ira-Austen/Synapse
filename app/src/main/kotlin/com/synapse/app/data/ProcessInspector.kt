@@ -85,26 +85,27 @@ object ProcessInspector {
         return try {
             val pkgs = rules.map { it.pkg }.distinct()
             val pkgFilter = pkgs.joinToString("|") { escapeRegex(it) }
-            // Single fast shell invocation: list matching processes, then inspect oom_score_adj & freezer state
+            // Single fast shell invocation without `exit` (never kill the persistent `su` pipeline)
             val cmd = """
                 if [ "${'$'}(id -u 2>/dev/null)" != "0" ]; then
                     echo "__NO_ROOT__"
-                    exit 1
+                else
+                    echo "__ROOT_OK__"
+                    ps -A -o PID,UID,RSS,NAME 2>/dev/null | grep -E "($pkgFilter)" | while read pid uid rss name; do
+                        case "${'$'}pid" in ''|*[!0-9]*) continue ;; esac
+                        adj=${'$'}(cat /proc/${'$'}pid/oom_score_adj 2>/dev/null || echo NA)
+                        wchan=${'$'}(cat /proc/${'$'}pid/wchan 2>/dev/null || echo "")
+                        frozen=0
+                        case "${'$'}wchan" in *refrigerator*|*freezer*) frozen=1 ;; esac
+                        cg=${'$'}(grep -m1 '^0::' /proc/${'$'}pid/cgroup 2>/dev/null | cut -d: -f3)
+                        if [ -n "${'$'}cg" ] && [ -f "/sys/fs/cgroup${'$'}cg/cgroup.freeze" ]; then
+                            fval=${'$'}(cat "/sys/fs/cgroup${'$'}cg/cgroup.freeze" 2>/dev/null || echo 0)
+                            if [ "${'$'}fval" = "1" ]; then frozen=1; fi
+                        fi
+                        echo "${'$'}pid|${'$'}uid|${'$'}rss|${'$'}adj|${'$'}frozen|${'$'}name"
+                    done
                 fi
-                echo "__ROOT_OK__"
-                ps -A -o PID,UID,RSS,NAME 2>/dev/null | grep -E "($pkgFilter)" | while read pid uid rss name; do
-                    case "${'$'}pid" in ''|*[!0-9]*) continue ;; esac
-                    adj=${'$'}(cat /proc/${'$'}pid/oom_score_adj 2>/dev/null || echo NA)
-                    wchan=${'$'}(cat /proc/${'$'}pid/wchan 2>/dev/null || echo "")
-                    frozen=0
-                    case "${'$'}wchan" in *refrigerator*|*freezer*) frozen=1 ;; esac
-                    cg=${'$'}(grep -m1 '^0::' /proc/${'$'}pid/cgroup 2>/dev/null | cut -d: -f3)
-                    if [ -n "${'$'}cg" ] && [ -f "/sys/fs/cgroup${'$'}cg/cgroup.freeze" ]; then
-                        fval=${'$'}(cat "/sys/fs/cgroup${'$'}cg/cgroup.freeze" 2>/dev/null || echo 0)
-                        if [ "${'$'}fval" = "1" ]; then frozen=1; fi
-                    fi
-                    echo "${'$'}pid|${'$'}uid|${'$'}rss|${'$'}adj|${'$'}frozen|${'$'}name"
-                done
+                :
             """.trimIndent()
 
             val res = shell.exec(cmd, timeoutMs = 6_000L)

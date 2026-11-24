@@ -1,5 +1,6 @@
 package com.synapse.kernel.plugins
 
+import android.content.pm.ResolveInfo
 import com.synapse.kernel.compat.OtaSafeguard
 import com.synapse.kernel.compat.SystemAdapter
 import com.synapse.kernel.core.KernelContext
@@ -14,12 +15,15 @@ import java.lang.reflect.Method
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * Non-destructive, zero-allocation hot-path ColorOS Hans / OFreezer exemption plugin (ColorOS 12–16).
+ * Non-destructive, zero-allocation hot-path ColorOS Hans / OFreezer & AppStartup exemption plugin
+ * spanning ColorOS 12–17 (Android 12–17).
  *
  * Optimizations:
  * - Caches `OplusHansPackage` pkg/uid reflection accessors per Class once (0 reflection scans on hot path).
  * - Throttles duplicate `HANS_BYPASSED` audit events per package (30s) while maintaining 100% real-time exemption.
  * - Never blocks unfreeze operations (`writeDevFile(..., freeze == false)` always proceeds).
+ * - Exempts managed packages from ColorOS `ActiveServicesExtImpl` / `OplusAppStartupManager` background
+ *   service & broadcast startup blocks so both manual wake and auto-resurrection actually spawn the process.
  */
 class OemHansPlugin : KernelPlugin {
     override val name: String = "OemHansPlugin"
@@ -40,6 +44,8 @@ class OemHansPlugin : KernelPlugin {
         val importanceClass = ctx.adapter.oplusHansImportanceClass
         val cgroupClass = ctx.adapter.oplusHansCGroupClass
         val managerClass = ctx.adapter.oplusHansManagerClass
+        val activeServicesExtClass = ctx.adapter.oplusActiveServicesExtClass
+        val startupManagerClass = ctx.adapter.oplusAppStartupManagerClass
 
         val allowlistMethods = ArrayList<Method>().apply {
             addAll(ctx.adapter.findAllMethodsByName(importanceClass, "isImportantPkg"))
@@ -57,8 +63,45 @@ class OemHansPlugin : KernelPlugin {
             addAll(ctx.adapter.findAllMethodsByName(managerClass, "freezeCgroupUid"))
         }
 
+        // ColorOS startup / service-launch interception gates (returns true when BLOCKING start)
+        val startupPreventServiceMethods = ArrayList<Method>().apply {
+            addAll(ctx.adapter.findAllMethodsByName(activeServicesExtClass, "interceptStartServiceLockedAfterStartMode"))
+            addAll(ctx.adapter.findAllMethodsByName(activeServicesExtClass, "interceptBringUpServices"))
+            addAll(ctx.adapter.findAllMethodsByName(startupManagerClass, "shouldPreventStartService"))
+        }.filter {
+            it.returnType == Boolean::class.javaPrimitiveType || it.returnType == Boolean::class.javaObjectType
+        }
+
+        val startupValidStartMethods = ctx.adapter.findAllMethodsByName(startupManagerClass, "validStartProcess")
+            .filter { m ->
+                (m.returnType == Boolean::class.javaPrimitiveType || m.returnType == Boolean::class.javaObjectType) &&
+                    m.parameterTypes.size >= 2 &&
+                    m.parameterTypes[0] == String::class.java &&
+                    m.parameterTypes[1] == Int::class.javaPrimitiveType
+            }
+
+        val startupPreventReceiverMethods = ctx.adapter.findAllMethodsByName(startupManagerClass, "shouldPreventSendReceiver")
+            .filter {
+                it.returnType == Boolean::class.javaPrimitiveType || it.returnType == Boolean::class.javaObjectType
+            }
+
+        val startupAllowRestartMethods = ctx.adapter.findAllMethodsByName(startupManagerClass, "isAllowRestartService")
+            .filter {
+                it.returnType == Boolean::class.javaPrimitiveType || it.returnType == Boolean::class.javaObjectType
+            }
+
+        val startupProtectWhitelistMethods = ctx.adapter.findAllMethodsByName(startupManagerClass, "inProtectWhiteList")
+            .filter { m ->
+                (m.returnType == Boolean::class.javaPrimitiveType || m.returnType == Boolean::class.javaObjectType) &&
+                    m.parameterTypes.size == 1 &&
+                    m.parameterTypes[0] == String::class.java
+            }
+
         val gate = ctx.otaSafeguard.allowOemHookActivation {
-            allowlistMethods.isNotEmpty() || freezeMethods.isNotEmpty()
+            allowlistMethods.isNotEmpty() ||
+                freezeMethods.isNotEmpty() ||
+                startupPreventServiceMethods.isNotEmpty() ||
+                startupValidStartMethods.isNotEmpty()
         }
 
         when (gate) {
@@ -125,14 +168,149 @@ class OemHansPlugin : KernelPlugin {
             count++
         }
 
+        // 3. Exempt managed packages from ColorOS service start interception (`ss_startup`, `sv_guardelf`, etc.)
+        for (method in startupPreventServiceMethods) {
+            val detailTag = "${method.declaringClass.simpleName}.${method.name} -> false"
+            SafeHook.hookReplaceable(ctx.bridge, ctx.audit, name, method) { call ->
+                val snap = ctx.currentSnapshot()
+                if (snap.masterEnabled && snap.oemHansBypassEnabled && snap.hasOemHansRules) {
+                    val sr = findServiceRecordArg(call.args)
+                    if (sr != null) {
+                        val pkg = ctx.adapter.getServiceRecordPackageName(sr)
+                        val userId = ctx.adapter.getServiceRecordUserId(sr)
+                        if (pkg != null && snap.isHansExempt(userId, pkg)) {
+                            recordHansAuditThrottled(pkg, userId, detailTag)
+                            return@hookReplaceable false
+                        }
+                    }
+                }
+                call.proceed()
+            }
+            count++
+        }
+
+        // 4. Exempt managed packages from `OplusAppStartupManager.validStartProcess(pkg, userId, type)` (true = prevent)
+        for (method in startupValidStartMethods) {
+            val detailTag = "${method.declaringClass.simpleName}.${method.name} -> false"
+            SafeHook.hookReplaceable(ctx.bridge, ctx.audit, name, method) { call ->
+                val snap = ctx.currentSnapshot()
+                if (snap.masterEnabled && snap.oemHansBypassEnabled && snap.hasOemHansRules) {
+                    val pkg = call.args.getOrNull(0) as? String
+                    val userId = (call.args.getOrNull(1) as? Int) ?: 0
+                    if (pkg != null && snap.isHansExempt(userId, pkg)) {
+                        recordHansAuditThrottled(pkg, userId, detailTag)
+                        return@hookReplaceable false
+                    }
+                }
+                call.proceed()
+            }
+            count++
+        }
+
+        // 5. Exempt managed packages from ColorOS broadcast startup interception
+        for (method in startupPreventReceiverMethods) {
+            val detailTag = "${method.declaringClass.simpleName}.${method.name} -> false"
+            SafeHook.hookReplaceable(ctx.bridge, ctx.audit, name, method) { call ->
+                val snap = ctx.currentSnapshot()
+                if (snap.masterEnabled && snap.oemHansBypassEnabled && snap.hasOemHansRules) {
+                    val target = extractReceiverTarget(call.args)
+                    if (target != null && snap.isHansExempt(target.second, target.first)) {
+                        recordHansAuditThrottled(target.first, target.second, detailTag)
+                        return@hookReplaceable false
+                    }
+                }
+                call.proceed()
+            }
+            count++
+        }
+
+        // 6. Allow service restarts & startup protection whitelist for managed packages
+        for (method in startupAllowRestartMethods) {
+            val detailTag = "${method.declaringClass.simpleName}.${method.name} -> true"
+            SafeHook.hookReplaceable(ctx.bridge, ctx.audit, name, method) { call ->
+                val snap = ctx.currentSnapshot()
+                if (snap.masterEnabled && snap.oemHansBypassEnabled && snap.hasOemHansRules) {
+                    val pr = findProcessRecordArg(call.args)
+                    if (pr != null) {
+                        val pkg = ctx.adapter.getProcessPackageName(pr)
+                        val userId = ctx.adapter.getProcessUserId(pr)
+                        if (pkg != null && snap.isHansExempt(userId, pkg)) {
+                            recordHansAuditThrottled(pkg, userId, detailTag)
+                            return@hookReplaceable true
+                        }
+                    }
+                }
+                call.proceed()
+            }
+            count++
+        }
+
+        for (method in startupProtectWhitelistMethods) {
+            val detailTag = "${method.declaringClass.simpleName}.${method.name} -> true"
+            SafeHook.hookReplaceable(ctx.bridge, ctx.audit, name, method) { call ->
+                val snap = ctx.currentSnapshot()
+                if (snap.masterEnabled && snap.oemHansBypassEnabled && snap.hasOemHansRules) {
+                    val pkg = call.args.getOrNull(0) as? String
+                    if (pkg != null && snap.isHansExemptAnyUser(pkg)) {
+                        recordHansAuditThrottled(pkg, 0, detailTag)
+                        return@hookReplaceable true
+                    }
+                }
+                call.proceed()
+            }
+            count++
+        }
+
         hookCount = count
         status = if (count > 0) PluginStatus.ACTIVE else PluginStatus.UNSUPPORTED_ROM
         statusMessage = if (gate == OtaSafeguard.OemGateResult.VERIFIED_AFTER_OTA) {
-            "ColorOS Hans verified after OTA ($count hooks)"
+            "ColorOS Hans & Startup verified after OTA ($count hooks)"
         } else {
-            "ColorOS Hans active ($count hooks)"
+            "ColorOS Hans & Startup active ($count hooks)"
         }
         return health()
+    }
+
+    private fun findServiceRecordArg(args: Array<Any?>): Any? {
+        val srClass = ctx.adapter.serviceRecordClass ?: return null
+        for (i in args.indices) {
+            val arg = args[i]
+            if (arg != null && srClass.isInstance(arg)) return arg
+        }
+        return null
+    }
+
+    private fun findProcessRecordArg(args: Array<Any?>): Any? {
+        val prClass = ctx.adapter.processRecordClass ?: return null
+        for (i in args.indices) {
+            val arg = args[i]
+            if (arg != null && prClass.isInstance(arg)) return arg
+        }
+        return null
+    }
+
+    private fun extractReceiverTarget(args: Array<Any?>): Pair<String, Int>? {
+        val bfClass = ctx.adapter.broadcastFilterClass
+        for (i in args.indices) {
+            val arg = args[i] ?: continue
+            if (arg is ResolveInfo) {
+                val ai = arg.activityInfo
+                val pkg = ai?.packageName
+                if (!pkg.isNullOrBlank()) {
+                    val uid = ai.applicationInfo?.uid ?: 0
+                    val userId = if (uid >= 0) uid / SystemAdapter.PER_USER_RANGE else 0
+                    return pkg to userId
+                }
+            }
+            if (bfClass != null && bfClass.isInstance(arg)) {
+                val pkg = ctx.adapter.getBroadcastFilterPackageName(arg)
+                if (!pkg.isNullOrBlank()) {
+                    val userId = ctx.adapter.getBroadcastFilterUserId(arg)
+                    return pkg to userId
+                }
+            }
+        }
+        return null
     }
 
     override fun health(): PluginHealth = PluginHealth(name, status, hookCount, statusMessage)
