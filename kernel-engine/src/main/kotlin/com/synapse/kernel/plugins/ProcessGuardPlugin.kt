@@ -196,7 +196,10 @@ class ProcessGuardPlugin : KernelPlugin {
         val procName = ctx.adapter.getProcessName(pr) ?: return false
         val userId = ctx.adapter.getProcessUserId(pr)
 
-        // 1. Always exempt the managed target push process itself
+        // Strictly PID/process-level exemption for `targetProcess` ONLY:
+        // In ISOLATED_PUSH mode (`targetProcess == pkg:push`), the heavy main UI process (`pkg`) and
+        // bloat subprocesses (`:tools`, `:channel`, `:webview`, etc.) MUST be allowed to freeze when
+        // cached so they consume 0% background CPU; single-process KEEP_ALIVE_ONLY rules match `pkg` directly.
         val directRule = snap.matchProcess(userId, procName)
         if (directRule != null && directRule.exemptAospFreezer) {
             if (shouldRecordAudit("frz:$userId:$procName")) {
@@ -206,24 +209,6 @@ class ProcessGuardPlugin : KernelPlugin {
                     processName = procName,
                     userId = userId,
                     detail = "AOSP CachedAppOptimizer bypassed (target)"
-                )
-                ctx.observerHub.notifyEvent(IpcProtocol.OBSERVER_EVENT_AUDIT)
-            }
-            return true
-        }
-
-        // 2. Anti-Binder-Freeze-Kill ONLY for the MAIN process (`procName == pkg`) of a managed package:
-        //    Bloat subprocesses like `:gameservice`, `:tool`, `:qzone`, `:miniapp`, `:webview`,
-        //    `:sandboxed_process` MUST remain frozen by AOSP Freezer to preserve maximum battery life!
-        val pkg = ctx.adapter.getProcessPackageName(pr) ?: return false
-        if (procName == pkg && snap.isAospFreezerExemptPackage(userId, pkg)) {
-            if (shouldRecordAudit("frz:$userId:$procName")) {
-                ctx.audit.record(
-                    type = AuditEventType.FREEZE_BLOCKED,
-                    pkg = pkg,
-                    processName = procName,
-                    userId = userId,
-                    detail = "AOSP CachedAppOptimizer bypassed (main anti-binder-kill)"
                 )
                 ctx.observerHub.notifyEvent(IpcProtocol.OBSERVER_EVENT_AUDIT)
             }

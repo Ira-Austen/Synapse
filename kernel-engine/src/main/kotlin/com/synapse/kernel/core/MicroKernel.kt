@@ -205,7 +205,7 @@ class MicroKernel private constructor(
     }
 
     companion object {
-        const val KERNEL_VERSION = "3.1.0"
+        const val KERNEL_VERSION = "3.1.1"
         private val booted = AtomicBoolean(false)
 
         @Volatile

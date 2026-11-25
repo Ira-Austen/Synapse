@@ -63,6 +63,12 @@ class KernelCoreTest {
         assertTrue(snap.isHansExempt(0, "com.chat.app"))
         assertTrue(snap.isHansExemptAnyUser("com.chat.app"))
         assertFalse(snap.isHansExempt(999, "com.chat.app"))
+        // Process-level Hans cached-freeze exemption: ONLY targetProcess (`:push`) is exempt, NOT main or bloat subprocesses
+        assertTrue(snap.isHansExemptProcess(0, "com.chat.app:push"))
+        assertTrue(snap.isHansExemptProcessAnyUser("com.chat.app:push"))
+        assertFalse(snap.isHansExemptProcess(0, "com.chat.app"))
+        assertFalse(snap.isHansExemptProcess(0, "com.chat.app:tools"))
+        assertFalse(snap.isHansExemptProcess(999, "com.chat.app:push"))
         assertTrue(snap.isMemoryDozeBypass(0, "com.chat.app"))
         assertTrue(snap.isMemoryDozeBypassAnyUser("com.chat.app"))
         assertFalse(snap.isMemoryDozeBypass(999, "com.chat.app"))

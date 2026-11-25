@@ -36,6 +36,7 @@ class OemHansPlugin : KernelPlugin {
     // Cached reflection accessors per concrete OplusHansPackage class -> zero reflection overhead
     private val pkgAccessorCache = ConcurrentHashMap<Class<*>, Any>(8)
     private val uidAccessorCache = ConcurrentHashMap<Class<*>, Any>(8)
+    private val reasonSetterCache = ConcurrentHashMap<Class<*>, Any>(8)
     private val auditThrottleByPkg = ConcurrentHashMap<String, Long>(16)
 
     override fun install(ctx: KernelContext): PluginHealth {
@@ -44,17 +45,38 @@ class OemHansPlugin : KernelPlugin {
         val importanceClass = ctx.adapter.oplusHansImportanceClass
         val cgroupClass = ctx.adapter.oplusHansCGroupClass
         val managerClass = ctx.adapter.oplusHansManagerClass
+        val dbConfigClass = ctx.adapter.oplusHansDbConfigClass
         val activeServicesExtClass = ctx.adapter.oplusActiveServicesExtClass
         val startupManagerClass = ctx.adapter.oplusAppStartupManagerClass
 
+        // Package-level Hans UID state exemption (keeps push socket/alarms/broadcasts alive)
         val allowlistMethods = ArrayList<Method>().apply {
             addAll(ctx.adapter.findAllMethodsByName(importanceClass, "isImportantPkg"))
             addAll(ctx.adapter.findAllMethodsByName(importanceClass, "isExemptFreezeImApp"))
-            addAll(ctx.adapter.findAllMethodsByName(managerClass, "inCachedFreezeWhiteList"))
-            addAll(ctx.adapter.findAllMethodsByName(managerClass, "inCachedFreezeKillWhiteList"))
         }.filter {
             it.returnType == Boolean::class.javaPrimitiveType || it.returnType == Boolean::class.javaObjectType
         }
+
+        // Process-level ColorOS cached-process freezer whitelist (`CachedAppOptimizerExtImpl.checkFreezeProc`):
+        // ONLY exempt `targetProcess` (`:push`), allowing heavy main UI / `:tools` / `:channel` processes to freeze!
+        val cachedFreezeWhitelistMethods = ctx.adapter.findAllMethodsByName(managerClass, "inCachedFreezeWhiteList")
+            .filter {
+                it.returnType == Boolean::class.javaPrimitiveType || it.returnType == Boolean::class.javaObjectType
+            }
+
+        val cachedFreezeKillWhitelistMethods = ctx.adapter.findAllMethodsByName(managerClass, "inCachedFreezeKillWhiteList")
+            .filter {
+                it.returnType == Boolean::class.javaPrimitiveType || it.returnType == Boolean::class.javaObjectType
+            }
+
+        // Eliminate ColorOS StrictMode's 3-second HansStateMachine `R -> M` polling spin for managed apps
+        val repeatIntervalMethods = ctx.adapter.findAllMethodsByName(dbConfigClass, "getImportantAdditionalRepeatTime")
+            .filter { m ->
+                (m.returnType == Long::class.javaPrimitiveType || m.returnType == Long::class.javaObjectType) &&
+                    m.parameterTypes.size >= 2 &&
+                    m.parameterTypes[0] == String::class.java &&
+                    m.parameterTypes[1] == Int::class.javaPrimitiveType
+            }
 
         val freezeMethods = ArrayList<Method>().apply {
             addAll(ctx.adapter.findAllMethodsByName(cgroupClass, "hansFreezeLocked"))
@@ -133,8 +155,73 @@ class OemHansPlugin : KernelPlugin {
                         val userId = if (uid >= 0) uid / SystemAdapter.PER_USER_RANGE else -1
                         val exempt = if (userId >= 0) snap.isHansExempt(userId, pkg) else true
                         if (exempt) {
+                            setImportantReasonIfSupported(call.args, "synapse")
                             recordHansAuditThrottled(pkg, userId.coerceAtLeast(0), detailTag)
                             return@hookReplaceable true
+                        }
+                    }
+                }
+                call.proceed()
+            }
+            count++
+        }
+
+        // Process-level exemption for ColorOS cached-process freezer (`inCachedFreezeWhiteList(uid, pkg, procName)`):
+        // Lets heavy main UI / `:tools` / `:channel` processes freeze cleanly while keeping `:push` unfrozen!
+        for (method in cachedFreezeWhitelistMethods) {
+            val detailTag = "${method.declaringClass.simpleName}.${method.name} -> true (proc)"
+            SafeHook.hookReplaceable(ctx.bridge, ctx.audit, name, method) { call ->
+                val snap = ctx.currentSnapshot()
+                if (snap.masterEnabled && snap.oemHansBypassEnabled && snap.hasOemHansRules) {
+                    val procName = extractLastProcessName(call.args)
+                    if (procName != null) {
+                        val uid = extractUid(call.args)
+                        val userId = if (uid >= 0) uid / SystemAdapter.PER_USER_RANGE else -1
+                        val exempt = if (userId >= 0) {
+                            snap.isHansExemptProcess(userId, procName)
+                        } else {
+                            snap.isHansExemptProcessAnyUser(procName)
+                        }
+                        if (exempt) {
+                            val pkg = procName.substringBefore(':')
+                            recordHansAuditThrottled(pkg, userId.coerceAtLeast(0), detailTag)
+                            return@hookReplaceable true
+                        }
+                    }
+                }
+                call.proceed()
+            }
+            count++
+        }
+
+        for (method in cachedFreezeKillWhitelistMethods) {
+            val detailTag = "${method.declaringClass.simpleName}.${method.name} -> true (proc)"
+            SafeHook.hookReplaceable(ctx.bridge, ctx.audit, name, method) { call ->
+                val snap = ctx.currentSnapshot()
+                if (snap.masterEnabled && snap.oemHansBypassEnabled && snap.hasOemHansRules) {
+                    val procName = extractLastProcessName(call.args)
+                    if (procName != null && snap.isHansExemptProcessAnyUser(procName)) {
+                        val pkg = procName.substringBefore(':')
+                        recordHansAuditThrottled(pkg, 0, detailTag)
+                        return@hookReplaceable true
+                    }
+                }
+                call.proceed()
+            }
+            count++
+        }
+
+        // Stretch HansStateMachine's importance re-check interval from 3s to 10m for managed apps
+        for (method in repeatIntervalMethods) {
+            SafeHook.hookReplaceable(ctx.bridge, ctx.audit, name, method) { call ->
+                val snap = ctx.currentSnapshot()
+                if (snap.masterEnabled && snap.oemHansBypassEnabled && snap.hasOemHansRules) {
+                    val pkg = call.args.getOrNull(0) as? String
+                    val uid = (call.args.getOrNull(1) as? Int) ?: -1
+                    if (pkg != null && uid >= 0) {
+                        val userId = uid / SystemAdapter.PER_USER_RANGE
+                        if (snap.isHansExempt(userId, pkg)) {
+                            return@hookReplaceable HANS_IMPORTANCE_BACKOFF_MS
                         }
                     }
                 }
@@ -402,7 +489,38 @@ class OemHansPlugin : KernelPlugin {
         return resolved
     }
 
+    private fun extractLastProcessName(args: Array<Any?>): String? {
+        for (i in args.indices.reversed()) {
+            val arg = args[i] as? String ?: continue
+            if (arg.indexOf('.') > 0 && arg.indexOf(' ') < 0) return arg
+        }
+        return null
+    }
+
+    private fun setImportantReasonIfSupported(args: Array<Any?>, reason: String) {
+        for (i in args.indices) {
+            val arg = args[i] ?: continue
+            if (arg is String || arg is Number || arg is Boolean) continue
+            val setter = resolveReasonSetter(arg.javaClass)
+            if (setter is Method) {
+                runCatching { setter.invoke(arg, reason) }
+                return
+            }
+        }
+    }
+
+    private fun resolveReasonSetter(cls: Class<*>): Any {
+        reasonSetterCache[cls]?.let { return it }
+        val resolved: Any = ctx.adapter.findMethod(cls, "setImportantReason", String::class.java)
+            ?: NO_ACCESSOR
+        if (reasonSetterCache.size < 32) {
+            reasonSetterCache[cls] = resolved
+        }
+        return resolved
+    }
+
     companion object {
         private val NO_ACCESSOR = Any()
+        private const val HANS_IMPORTANCE_BACKOFF_MS = 600_000L // 10 min (replaces 3s StrictMode spin)
     }
 }

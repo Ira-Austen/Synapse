@@ -55,8 +55,8 @@ android {
         applicationId = stealthPackageName
         minSdk = 30
         targetSdk = 36
-        versionCode = 310
-        versionName = "3.1.0"
+        versionCode = 311
+        versionName = "3.1.1"
 
         buildConfigField("int", "IPC_MAGIC_CODE", stealthMagicCode.toString())
         buildConfigField("int", "IPC_HEADER_MAGIC", stealthHeaderMagic.toString())

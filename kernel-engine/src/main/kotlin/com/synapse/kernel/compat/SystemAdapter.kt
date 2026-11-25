@@ -42,6 +42,7 @@ class SystemAdapter(
         loadClass("com.android.server.hans.freeze.HansCGroup")
             ?: loadClass("com.android.server.am.HansCGroup")
             ?: loadClass("com.android.server.am.OplusHansCGroup")
+    val oplusHansDbConfigClass: Class<*>? = loadClass("com.android.server.hans.OplusHansDBConfig")
     val oplusActiveServicesExtClass: Class<*>? = loadClass("com.android.server.am.ActiveServicesExtImpl")
     val oplusAppStartupManagerClass: Class<*>? = loadClass("com.android.server.am.OplusAppStartupManager")
     val serviceRecordClass: Class<*>? = loadClass("com.android.server.am.ServiceRecord")

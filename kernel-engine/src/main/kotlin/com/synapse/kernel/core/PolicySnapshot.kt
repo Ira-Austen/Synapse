@@ -69,6 +69,18 @@ class PolicySnapshot private constructor(
         return hansExemptPkgNames.contains(pkg)
     }
 
+    fun isHansExemptProcess(userId: Int, processName: String): Boolean {
+        if (!masterEnabled || !oemHansBypassEnabled || !hasOemHansRules) return false
+        val rule = matchProcess(userId, processName) ?: return false
+        return rule.exemptOemFreezer
+    }
+
+    fun isHansExemptProcessAnyUser(processName: String): Boolean {
+        if (!masterEnabled || !oemHansBypassEnabled || !hasOemHansRules) return false
+        if (!managedProcessNames.contains(processName)) return false
+        return byProcessKey.values.any { it.targetProcess == processName && it.exemptOemFreezer }
+    }
+
     fun isMemoryDozeBypass(userId: Int, pkg: String): Boolean {
         if (!masterEnabled || !memoryDozeBypassEnabled || !hasMemoryDozeRules) return false
         if (!dozeBypassPkgNames.contains(pkg)) return false
